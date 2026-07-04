@@ -767,6 +767,11 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
                     save_state(state)
                     codes_str = "\n".join([f"<code>{c}</code>" for c in new_codes])
                     send_telegram(f"🔑 Generated {count} ({duration}-Day) Code(s):\n\n{codes_str}\n\nThese will expire once used.", chat_id=cb_chat)
+                elif cb_data == "admin_broadcast":
+                    answer_callback(cb_id)
+                    state["admin_state"] = "awaiting_broadcast"
+                    save_state(state)
+                    send_telegram("📣 <b>Broadcast Mode</b>\n\nPlease type the message you want to send to all users. (Or send /cancel to abort)", chat_id=cb_chat)
                 elif cb_data.startswith("admin_manage_users"):
                     answer_callback(cb_id)
                     parts = cb_data.split("_")
