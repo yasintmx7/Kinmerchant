@@ -909,9 +909,13 @@ def _cmd_start(state: dict, chat_id: str, first_name: str = "Unknown", duration_
         f"every {CONFIG['private_interval']}s"
         if CONFIG.get("cookie") else "Not set"
     )
+    user_info = state.get("subscribers", {}).get(chat_id, {})
+    expires_at = user_info.get("expires_at", "Never") if isinstance(user_info, dict) else "Never"
+    
     msg = (
         "🤖 <b>Kintara Merchant Alert Bot</b>\n\n"
-        f"✅ <b>Access Granted!</b> Welcome, {first_name}.\n\n"
+        f"✅ <b>Access Granted!</b> Welcome, {first_name}.\n"
+        f"⏳ <b>Subscription Expires:</b> {expires_at}\n\n"
         f"📡 Check interval : <b>{eff_interval}s</b>  (silent — alerts on change only)\n"
         f"🔐 Personal       : <b>{cookie_status}</b>\n\n"
         "Tap a button below:"
