@@ -759,7 +759,7 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
                         state["invite_codes"] = invites
                     
                     new_codes = []
-                    prefix = "TRIAL-" if duration == 1 else "KINTARA-"
+                    prefix = "KIN-" if duration == 1 else "KINTARA-"
                     for _ in range(count):
                         new_code = prefix + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
                         invites[new_code] = duration
