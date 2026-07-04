@@ -767,9 +767,11 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
                     save_state(state)
                     codes_str = "\n".join([f"<code>{c}</code>" for c in new_codes])
                     send_telegram(f"🔑 Generated {count} ({duration}-Day) Code(s):\n\n{codes_str}\n\nThese will expire once used.", chat_id=cb_chat)
-                elif cb_data == "admin_manage_users":
+                elif cb_data.startswith("admin_manage_users"):
                     answer_callback(cb_id)
-                    state = _cmd_admin_users(state, cb_chat, 0)
+                    parts = cb_data.split("_")
+                    page = int(parts[-1]) if parts[-1].isdigit() else 0
+                    state = _cmd_admin_users(state, cb_chat, page)
                 elif cb_data.startswith("kick_"):
                     target = cb_data.split("_")[1]
                     subs = state.setdefault("subscribers", {})
