@@ -17,14 +17,35 @@ import json
 import os
 import sys
 import time
+import logging
 import traceback
 import random
 import string
-from datetime import datetime
+from datetime import datetime, timedelta
 import concurrent.futures
 
 import requests
 from dotenv import load_dotenv
+
+
+# ---------------------------------------------------------------------------
+# Logging Setup
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+def print(*args, **kwargs):
+    # Override print globally to pipe to logging info
+    msg = " ".join(map(str, args))
+    if "[WARN]" in msg or "[ERROR]" in msg or "error" in msg.lower():
+        logging.warning(msg)
+    else:
+        logging.info(msg)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -727,17 +748,44 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
                 elif cb_data == "admin_dashboard" and cb_chat == str(CONFIG.get("chat_id")):
                     answer_callback(cb_id)
                     _cmd_admin_dashboard(state, cb_chat)
-                elif cb_data == "admin_generate_code":
+                elif cb_data.startswith("admin_generate_code_"):
                     answer_callback(cb_id)
-                    new_code = "INVITE-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
-                    invites = state.setdefault("invite_codes", [])
-                    invites.append(new_code)
+                    parts = cb_data.split("_")
+                    duration = int(parts[-2])
+                    count = int(parts[-1])
+                    invites = state.setdefault("invite_codes", {})
+                    if isinstance(invites, list):
+                        invites = {c: 30 for c in invites}
+                        state["invite_codes"] = invites
+                    
+                    new_codes = []
+                    prefix = "TRIAL-" if duration == 1 else "KINTARA-"
+                    for _ in range(count):
+                        new_code = prefix + "".join(random.choices(string.ascii_uppercase + string.digits, k=5))
+                        invites[new_code] = duration
+                        new_codes.append(new_code)
                     save_state(state)
-                    send_telegram(f"🔑 New Single-Use Invite Code generated:\n\n<code>{new_code}</code>\n\nGive this to a friend. It will expire once they use it.", chat_id=cb_chat)
+                    codes_str = "\n".join([f"<code>{c}</code>" for c in new_codes])
+                    send_telegram(f"🔑 Generated {count} ({duration}-Day) Code(s):\n\n{codes_str}\n\nThese will expire once used.", chat_id=cb_chat)
                 elif cb_data == "admin_manage_users":
                     answer_callback(cb_id)
-                    state = _cmd_admin_users(state, cb_chat)
+                    state = _cmd_admin_users(state, cb_chat, 0)
                 elif cb_data.startswith("kick_"):
+                    target = cb_data.split("_")[1]
+                    subs = state.setdefault("subscribers", {})
+                    if target in subs:
+                        name = subs[target].get("name", "Unknown") if isinstance(subs[target], dict) else "Unknown"
+                        kb = {
+                            "inline_keyboard": [
+                                [{"text": "✅ Yes, Kick", "callback_data": f"dokick_{target}"},
+                                 {"text": "❌ Cancel", "callback_data": "admin_manage_users"}]
+                            ]
+                        }
+                        send_telegram(f"⚠️ Are you sure you want to kick <b>{name}</b>?", keyboard=kb, chat_id=cb_chat)
+                        answer_callback(cb_id)
+                    else:
+                        answer_callback(cb_id, "User not found.")
+                elif cb_data.startswith("dokick_"):
                     target = cb_data.split("_")[1]
                     subs = state.setdefault("subscribers", {})
                     if target in subs:
@@ -747,7 +795,7 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
                         send_telegram("🛑 Your access has been revoked by the admin.", chat_id=target)
                     else:
                         answer_callback(cb_id, "User not found.")
-                    state = _cmd_admin_users(state, cb_chat)
+                    state = _cmd_admin_users(state, cb_chat, 0)
                 else:
                     answer_callback(cb_id)
             else:
@@ -783,14 +831,38 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
             continue
             
         if not is_sub:
-            invites = state.get("invite_codes", [])
+            invites = state.get("invite_codes", {})
+            if isinstance(invites, list):
+                invites = {c: 30 for c in invites}
+                state["invite_codes"] = invites
             master_code = CONFIG.get("access_code")
             if text.strip() == master_code or text.strip() in invites:
+                duration_days = 36500 if text.strip() == master_code else invites.get(text.strip(), 30)
                 if text.strip() in invites:
-                    invites.remove(text.strip())
-                state = _cmd_start(state, chat_id, first_name)
+                    del invites[text.strip()]
+                state = _cmd_start(state, chat_id, first_name, duration_days)
             else:
                 send_telegram("❌ <b>Invalid code.</b> Please try again.", chat_id=chat_id)
+            continue
+            
+        # Admin Broadcast Handling
+        if is_owner and state.get("admin_state") == "awaiting_broadcast":
+            if command == "/cancel":
+                state["admin_state"] = None
+                save_state(state)
+                send_telegram("Broadcast cancelled.", chat_id=chat_id)
+                continue
+            
+            subs = state.get("subscribers", {})
+            sent_count = 0
+            for sub_id in subs.keys():
+                if sub_id != str(CONFIG.get("chat_id")):
+                    send_telegram(f"📣 <b>Admin Broadcast</b>\n\n{text}", chat_id=sub_id)
+                    sent_count += 1
+                    
+            state["admin_state"] = None
+            save_state(state)
+            send_telegram(f"✅ Broadcast sent to {sent_count} users.", chat_id=chat_id)
             continue
 
         if command == "/admin" and is_owner:
@@ -821,10 +893,11 @@ def handle_telegram_commands(state: dict, update_offset: list) -> dict:
     return state
 
 
-def _cmd_start(state: dict, chat_id: str, first_name: str = "Unknown") -> dict:
+def _cmd_start(state: dict, chat_id: str, first_name: str = "Unknown", duration_days: int = 30) -> dict:
     subs = state.setdefault("subscribers", {})
     if chat_id not in subs:
-        subs[chat_id] = {"name": first_name, "joined": ""}
+        expires_at = (datetime.now() + timedelta(days=duration_days)).strftime("%Y-%m-%d %H:%M")
+        subs[chat_id] = {"name": first_name, "joined": datetime.now().strftime("%Y-%m-%d %H:%M"), "expires_at": expires_at}
         save_state(state)
         print(f"[{_ts()}] New subscriber added: {first_name} ({chat_id})")
 
@@ -849,30 +922,59 @@ def _cmd_start(state: dict, chat_id: str, first_name: str = "Unknown") -> dict:
 def _cmd_admin_dashboard(state: dict, chat_id: str) -> None:
     kb = {
         "inline_keyboard": [
-            [{"text": "🔑 Generate Invite Code", "callback_data": "admin_generate_code"}],
-            [{"text": "👥 Manage Users", "callback_data": "admin_manage_users"}],
+            [{"text": "🔑 Gen 1 Trial (1 Day)", "callback_data": "admin_generate_code_1_1"},
+             {"text": "🔑 Gen 5 Trial", "callback_data": "admin_generate_code_1_5"}],
+            [{"text": "🔑 Gen 1 Premium (30 Day)", "callback_data": "admin_generate_code_30_1"},
+             {"text": "🔑 Gen 5 Premium", "callback_data": "admin_generate_code_30_5"}],
+            [{"text": "📣 Broadcast", "callback_data": "admin_broadcast"}],
+            [{"text": "👥 Manage Users", "callback_data": "admin_manage_users_0"}],
         ]
     }
     send_telegram("👑 <b>Admin Dashboard</b>\n\nSelect an option below:", keyboard=kb, chat_id=chat_id)
 
 
-def _cmd_admin_users(state: dict, chat_id: str) -> dict:
+def _cmd_admin_users(state: dict, chat_id: str, page: int = 0) -> dict:
     subs = state.get("subscribers", {})
     if not subs:
         send_telegram("No other users are currently subscribed.", chat_id=chat_id)
         return state
         
     kb = {"inline_keyboard": []}
-    for sub_id, info in subs.items():
-        if sub_id == str(CONFIG.get("chat_id")):
-            continue
+    user_list = []
+    
+    active_subs = {k: v for k, v in subs.items() if k != str(CONFIG.get("chat_id"))}
+    sub_keys = list(active_subs.keys())
+    
+    per_page = 10
+    total_pages = max(1, (len(sub_keys) + per_page - 1) // per_page)
+    page = min(max(0, page), total_pages - 1)
+    
+    start_idx = page * per_page
+    end_idx = start_idx + per_page
+    page_keys = sub_keys[start_idx:end_idx]
+    
+    for sub_id in page_keys:
+        info = active_subs[sub_id]
         name = info.get("name", "Unknown") if isinstance(info, dict) else "Unknown"
+        joined = info.get("joined", "Unknown Date") if isinstance(info, dict) else "Unknown Date"
+        expires = info.get("expires_at", "Never") if isinstance(info, dict) else "Never"
+        user_list.append(f"• <b>{name}</b> (Joined: {joined}, Exp: {expires})")
         kb["inline_keyboard"].append([
             {"text": f"Kick {name}", "callback_data": f"kick_{sub_id}"}
         ])
-    kb["inline_keyboard"].append([{"text": "◀️ Back", "callback_data": "noop"}])
+        
+    nav_row = []
+    if page > 0:
+        nav_row.append({"text": "◀️ Prev", "callback_data": f"admin_manage_users_{page-1}"})
+    if page < total_pages - 1:
+        nav_row.append({"text": "Next ▶️", "callback_data": f"admin_manage_users_{page+1}"})
+    if nav_row:
+        kb["inline_keyboard"].append(nav_row)
+        
+    kb["inline_keyboard"].append([{"text": "◀️ Back", "callback_data": "admin_dashboard"}])
     
-    send_telegram("👥 <b>Manage Users</b>\n\nTap a user to kick them:", keyboard=kb, chat_id=chat_id)
+    users_text = "\n".join(user_list) if user_list else "No other users."
+    send_telegram(f"👥 <b>Manage Users (Page {page+1}/{total_pages})</b>\n\n{users_text}\n\nTap a user below to kick them:", keyboard=kb, chat_id=chat_id)
     return state
 
 
@@ -1114,6 +1216,30 @@ def main() -> None:
                     and now - last_private_check >= CONFIG["private_interval"]):
                 state              = check_private_status(state)
                 last_private_check = time.time()
+
+            # --- Auto-kick Expired Users ---
+            if now - state.get("last_expire_check", 0) >= 3600:  # Check every hour
+                state["last_expire_check"] = now
+                subs = state.get("subscribers", {})
+                expired = []
+                for sub_id, info in subs.items():
+                    if sub_id == str(CONFIG.get("chat_id")):
+                        continue
+                    if isinstance(info, dict):
+                        expires_at = info.get("expires_at")
+                        if expires_at and expires_at != "Never":
+                            try:
+                                exp_dt = datetime.strptime(expires_at, "%Y-%m-%d %H:%M")
+                                if datetime.now() > exp_dt:
+                                    expired.append(sub_id)
+                            except ValueError:
+                                pass
+                for exp_id in expired:
+                    del subs[exp_id]
+                    send_telegram("🛑 Your subscription has expired! Please provide a new Access Code via /start to regain access.", chat_id=exp_id)
+                    logging.info(f"User {exp_id} expired and was kicked.")
+                if expired:
+                    save_state(state)
 
         except KeyboardInterrupt:
             print("\nBot stopped by user.")
